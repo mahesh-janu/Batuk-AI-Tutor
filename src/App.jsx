@@ -2,12 +2,15 @@ import { useState } from 'react';
 import { motion } from 'framer-motion';
 import confetti from 'canvas-confetti';
 import { Flame, BookOpen, Send, Bot } from 'lucide-react';
+import { askGroq } from './api.js';
 
 function App() {
   const [streak, setStreak] = useState(0);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [thinking, setThinking] = useState(false);
+  const [apiKey, setApiKey] = useState('');
+  const [error, setError] = useState('');
 
   const handleCorrect = () => {
     setStreak(s => s + 1);
@@ -19,18 +22,29 @@ function App() {
     });
   };
 
-  const sendMessage = () => {
+  const sendMessage = async () => {
     if (!input.trim()) return;
+    if (!apiKey.trim()) {
+      setError('Enter Groq API key below');
+      return;
+    }
+
     const userMsg = { role: 'user', content: input };
     setMessages(m => [...m, userMsg]);
     setInput('');
     setThinking(true);
+    setError('');
 
-    setTimeout(() => {
-      setMessages(m => [...m, { role: 'ai', content: `AI Tutor: You asked "${input}". Here's the answer...` }]);
-      setThinking(false);
+    try {
+      const prompt = `You are a Grade 8 Math tutor. Solve step-by-step and explain clearly: ${input}`;
+      const answer = await askGroq(prompt, apiKey);
+      setMessages(m => [...m, { role: 'ai', content: answer }]);
       handleCorrect();
-    }, 1500);
+    } catch (err) {
+      setMessages(m => [...m, { role: 'ai', content: `Error: ${err.message}` }]);
+    } finally {
+      setThinking(false);
+    }
   };
 
   return (
@@ -67,6 +81,19 @@ function App() {
           >
             Start Lesson
           </motion.button>
+
+          {/* GROQ API KEY INPUT */}
+          <div className="mt-6 border-t pt-6">
+            <input
+              type="password"
+              placeholder="Groq API Key"
+              value={apiKey}
+              onChange={e => setApiKey(e.target.value)}
+              className="w-full px-4 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+            />
+            {error && <p className="text-red-500 text-xs mt-2">{error}</p>}
+            <p className="text-xs text-gray-500 mt-2">Get free key: console.groq.com</p>
+          </div>
         </div>
       </motion.aside>
 
@@ -86,7 +113,7 @@ function App() {
                   : 'bg-white border border-gray-200'
               }`}>
                 {m.role === 'ai' && <Bot className="w-6 h-6 inline mr-2 text-green-600" />}
-                <span className="text-base leading-relaxed">{m.content}</span>
+                <span className="text-base leading-relaxed whitespace-pre-wrap">{m.content}</span>
               </div>
             </motion.div>
           ))}
@@ -115,6 +142,9 @@ function App() {
             <motion.button
               whileHover={{ scale: 1.1 }}
               whileTap={{ scale: 0.9 }}
+              onClick={sendMessage}
+              className="bg-green-600 text-white p-4 rounded-2xl shadow-lg hover:bg-green-700 transition"
+whileTap={{ scale: 0.9 }}
               onClick={sendMessage}
               className="bg-green-600 text-white p-4 rounded-2xl shadow-lg hover:bg-green-700 transition"
             >
