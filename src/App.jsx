@@ -1,9 +1,11 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import confetti from 'canvas-confetti';
-import { Flame, BookOpen, Send, Bot, Upload } from 'lucide-react';
+import { Flame, BookOpen, Send, Bot, Upload, Mic, Square } from 'lucide-react';
 import { askGroq } from './api.js';
 import { extractTextFromPdf } from './utils.js';
+import { ocrPdf } from './ocr.js';
+import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition';
 
 function App() {
   const [streak, setStreak] = useState(0);
@@ -14,7 +16,43 @@ function App() {
   const [error, setError] = useState('');
   const [notes, setNotes] = useState('');
   const [uploadedFile, setUploadedFile] = useState(null);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [models, setModels] = useState([]);
+  const [selectedModel, setSelectedModel] = useState('llama3-8b-8192');
+  const [loadingModels, setLoadingModels] = useState(true);
   const fileInputRef = useRef(null);
+
+  const {
+    transcript,
+    listening,
+    resetTranscript,
+    browserSupportsSpeechRecognition
+  } = useSpeechRecognition();
+
+  // Load models from public/models.json
+  useEffect(() => {
+    console.log('Fetching models.json...');
+    fetch('/models.json', { cache: 'no-cache' })
+      .then(res => {
+        console.log('Fetch response:', res.status, res.url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} - models.json not found`);
+        return res.json();
+      })
+      .then(data => {
+        console.log('Models loaded successfully:', data);
+        setModels(data);
+        setSelectedModel(data[0]);
+      })
+      .catch(err => {
+        console.error('MODELS FETCH FAILED:', err);
+        setError(`Failed to load models: ${err.message}`);
+      })
+      .finally(() => {
+        console.log('Loading models finished.');
+        setLoadingModels(false);
+      });
+  }, []);
 
   const handleCorrect = () => {
     setStreak(s => s + 1);
@@ -28,6 +66,32 @@ function App() {
 
   const appendMessage = (content, role = 'ai') => {
     setMessages(m => [...m, { role, content }]);
+  };
+
+  const speak = (text) => {
+    if ('speechSynthesis' in window) {
+      setIsSpeaking(true);
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = 0.9;
+      utterance.pitch = 1.1;
+      utterance.onend = () => setIsSpeaking(false);
+      speechSynthesis.speak(utterance);
+    }
+  };
+
+  const startListening = () => {
+    setIsListening(true);
+    SpeechRecognition.startListening({ continuous: true });
+  };
+
+  const stopListening = () => {
+    setIsListening(false);
+    SpeechRecognition.stopListening();
+    if (transcript.trim()) {
+      setInput(transcript);
+      resetTranscript();
+      sendMessage();
+    }
   };
 
   const sendMessage = async () => {
@@ -50,9 +114,10 @@ function App() {
       }
 
       const prompt = `${context}You are a Grade 8 Math tutor. Answer using only the provided notes if available. Question: ${input}`;
-      const answer = await askGroq(prompt, apiKey);
+      const answer = await askGroq(prompt, apiKey, selectedModel);
       appendMessage(answer, 'ai');
       handleCorrect();
+      speak(answer);
     } catch (err) {
       appendMessage(`Error: ${err.message}`, 'ai');
     } finally {
@@ -109,6 +174,30 @@ function App() {
             <p className="text-xs text-gray-500 mt-2">Get free key: console.groq.com</p>
           </div>
 
+          {/* MODEL SELECTOR */}
+          <div className="mt-4 border-t pt-4">
+            <label className="text-sm font-medium text-gray-600 mb-1 block">AI Model</label>
+            {loadingModels ? (
+              <p className="text-xs text-gray-500">Loading models...</p>
+            ) : (
+              <select
+                value={selectedModel}
+                onChange={e => setSelectedModel(e.target.value)}
+                className="w-full px-4 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+              >
+                {models.map(m => (
+                  <option key={m} value={m}>
+                    {m.includes('70b') ? '⚡ ' : m.includes('8b') ? '⚡ ' : '🐢 '}
+                    {m.split('-')[1].toUpperCase()} ({m.includes('70b') ? 'Pro' : m.includes('8b') ? 'Fast' : 'Free'})
+                  </option>
+                ))}
+              </select>
+            )}
+            <p className="text-xs text-gray-500 mt-1">
+              {selectedModel.includes('70b') ? 'High accuracy (slower)' : 'Fast & cheap'}
+            </p>
+          </div>
+
           {/* PDF UPLOAD */}
           <div className="mt-4 border-t pt-4">
             <button
@@ -128,24 +217,31 @@ function App() {
                 setUploadedFile(file.name);
                 appendMessage(`Extracting text from ${file.name}...`, 'ai');
                 try {
-                  const text = await extractTextFromPdf(file);
-                  console.log('RAW EXTRACTED TEXT:', text);
-                  console.log('TEXT LENGTH:', text.length);
-                  if (text.length === 0) {
-                    appendMessage(`PDF loaded but NO TEXT found. Is it a scanned image?`, 'ai');
-                  } else {
-                    const limited = text.slice(0, 30000);
-                    setNotes(limited);
-                    appendMessage(`Notes loaded (${text.length} chars → ${limited.length} used)`, 'ai');
+                  let text = '';
+                  try {
+                    text = await extractTextFromPdf(file);
+                    if (text.trim().length === 0) throw new Error('Empty');
+                  } catch (pdfErr) {
+                    appendMessage('No text in PDF. Running OCR on scanned pages...', 'ai');
+                    text = await ocrPdf(file);
                   }
+
+                  console.log('FINAL TEXT LENGTH:', text.length);
+                  if (text.trim().length === 0) {
+                    appendMessage('No text found even with OCR. Is it blank?', 'ai');
+                    return;
+                  }
+
+                  const limited = text.slice(0, 30000);
+                  setNotes(limited);
+                  appendMessage(`Notes loaded (${text.length} chars → ${limited.length} used)`, 'ai');
                 } catch (err) {
-                  console.error('PDF EXTRACT ERROR:', err);
-                  appendMessage(`Failed to read PDF: ${err.message}`, 'ai');
+                  appendMessage(`OCR failed: ${err.message}`, 'ai');
                 }
               }}
             />
             {uploadedFile && (
-              <p className="text-xs text-green-600 mt-2 truncate">📄 {uploadedFile}</p>
+              <p className="text-xs text-green-600 mt-2 truncate">PDF: {uploadedFile}</p>
             )}
           </div>
         </div>
@@ -190,10 +286,18 @@ function App() {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyPress={e => e.key === 'Enter' && sendMessage()}
-              placeholder="Ask about fractions..."
+              placeholder="Ask about fractions... or tap mic"
               name="question"
               className="flex-1 px-6 py-4 rounded-2xl border border-gray-300 shadow-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent text-lg"
             />
+            <motion.button
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              onClick={isListening ? stopListening : startListening}
+              className={`p-4 rounded-2xl shadow-lg transition ${isListening ? 'bg-red-600' : 'bg-blue-600'} text-white`}
+            >
+              {isListening ? <Square className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+            </motion.button>
             <motion.button
               whileHover={{ scale: 1.1 }}
               whileTap={{ scale: 0.9 }}
@@ -203,6 +307,7 @@ function App() {
               <Send className="w-6 h-6" />
             </motion.button>
           </div>
+          {isSpeaking && <p className="text-center text-sm text-gray-500 mt-2">Speaking...</p>}
         </div>
       </main>
     </div>
