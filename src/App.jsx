@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { motion } from 'framer-motion';
 import confetti from 'canvas-confetti';
-import { Flame, BookOpen, Send, Bot } from 'lucide-react';
+import { Flame, BookOpen, Send, Bot, Upload } from 'lucide-react';
 import { askGroq } from './api.js';
+import { extractTextFromPdf } from './utils.js';
 
 function App() {
   const [streak, setStreak] = useState(0);
@@ -11,6 +12,9 @@ function App() {
   const [thinking, setThinking] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [error, setError] = useState('');
+  const [notes, setNotes] = useState('');
+  const [uploadedFile, setUploadedFile] = useState(null);
+  const fileInputRef = useRef(null);
 
   const handleCorrect = () => {
     setStreak(s => s + 1);
@@ -22,26 +26,35 @@ function App() {
     });
   };
 
+  const appendMessage = (content, role = 'ai') => {
+    setMessages(m => [...m, { role, content }]);
+  };
+
   const sendMessage = async () => {
     if (!input.trim()) return;
     if (!apiKey.trim()) {
-      setError('Enter Groq API key below');
+      setError('Enter Groq API key');
       return;
     }
 
-    const userMsg = { role: 'user', content: input };
-    setMessages(m => [...m, userMsg]);
+    appendMessage(input, 'user');
     setInput('');
     setThinking(true);
     setError('');
 
     try {
-      const prompt = `You are a Grade 8 Math tutor. Solve step-by-step and explain clearly: ${input}`;
+      let context = '';
+      if (uploadedFile && notes) {
+        context = `Use ONLY this content from uploaded notes:\n${notes}\n\n`;
+        appendMessage(`Using notes from: ${uploadedFile}`, 'ai');
+      }
+
+      const prompt = `${context}You are a Grade 8 Math tutor. Answer using only the provided notes if available. Question: ${input}`;
       const answer = await askGroq(prompt, apiKey);
-      setMessages(m => [...m, { role: 'ai', content: answer }]);
+      appendMessage(answer, 'ai');
       handleCorrect();
     } catch (err) {
-      setMessages(m => [...m, { role: 'ai', content: `Error: ${err.message}` }]);
+      appendMessage(`Error: ${err.message}`, 'ai');
     } finally {
       setThinking(false);
     }
@@ -82,17 +95,58 @@ function App() {
             Start Lesson
           </motion.button>
 
-          {/* GROQ API KEY INPUT */}
+          {/* GROQ API KEY */}
           <div className="mt-6 border-t pt-6">
             <input
               type="password"
               placeholder="Groq API Key"
               value={apiKey}
               onChange={e => setApiKey(e.target.value)}
+              name="groq-api-key"
               className="w-full px-4 py-2 rounded-lg border text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
             />
             {error && <p className="text-red-500 text-xs mt-2">{error}</p>}
             <p className="text-xs text-gray-500 mt-2">Get free key: console.groq.com</p>
+          </div>
+
+          {/* PDF UPLOAD */}
+          <div className="mt-4 border-t pt-4">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="w-full bg-blue-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-blue-700 flex items-center justify-center gap-2"
+            >
+              <Upload className="w-4 h-4" /> Upload PDF Notes
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf"
+              className="hidden"
+              onChange={async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setUploadedFile(file.name);
+                appendMessage(`Extracting text from ${file.name}...`, 'ai');
+                try {
+                  const text = await extractTextFromPdf(file);
+                  console.log('RAW EXTRACTED TEXT:', text);
+                  console.log('TEXT LENGTH:', text.length);
+                  if (text.length === 0) {
+                    appendMessage(`PDF loaded but NO TEXT found. Is it a scanned image?`, 'ai');
+                  } else {
+                    const limited = text.slice(0, 30000);
+                    setNotes(limited);
+                    appendMessage(`Notes loaded (${text.length} chars → ${limited.length} used)`, 'ai');
+                  }
+                } catch (err) {
+                  console.error('PDF EXTRACT ERROR:', err);
+                  appendMessage(`Failed to read PDF: ${err.message}`, 'ai');
+                }
+              }}
+            />
+            {uploadedFile && (
+              <p className="text-xs text-green-600 mt-2 truncate">📄 {uploadedFile}</p>
+            )}
           </div>
         </div>
       </motion.aside>
@@ -137,14 +191,12 @@ function App() {
               onChange={e => setInput(e.target.value)}
               onKeyPress={e => e.key === 'Enter' && sendMessage()}
               placeholder="Ask about fractions..."
+              name="question"
               className="flex-1 px-6 py-4 rounded-2xl border border-gray-300 shadow-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent text-lg"
             />
             <motion.button
               whileHover={{ scale: 1.1 }}
               whileTap={{ scale: 0.9 }}
-              onClick={sendMessage}
-              className="bg-green-600 text-white p-4 rounded-2xl shadow-lg hover:bg-green-700 transition"
-whileTap={{ scale: 0.9 }}
               onClick={sendMessage}
               className="bg-green-600 text-white p-4 rounded-2xl shadow-lg hover:bg-green-700 transition"
             >
